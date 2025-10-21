@@ -1,0 +1,219 @@
+# BDU Inventory Management – 3‑Tier App (React + FastAPI + MySQL/RDS)
+
+> Tài liệu take note tổng hợp: chạy **VS Code trước** (localhost), rồi **Docker hóa**, sau đó **deploy AWS (EC2 + RDS)**. Bao gồm cả bộ khung 3‑tier mẫu và phiên bản **BDU Inventory**.
+
+---
+
+## 📦 Tải bộ source
+
+* React + FastAPI (khung 3‑tier) **(dev trước, rồi deploy)**
+  ⬇️ `aws-3tier-react-fastapi.zip` – [Download](sandbox:/mnt/data/aws-3tier-react-fastapi.zip)
+* React + FastAPI (khung 3‑tier) **+ Docker hóa đầy đủ**
+  ⬇️ `aws-3tier-react-fastapi-dockerized.zip` – [Download](sandbox:/mnt/data/aws-3tier-react-fastapi-dockerized.zip)
+* **BDU Inventory Management** (React + FastAPI + MySQL/RDS)
+  ⬇️ `bdu-inventory-react-fastapi.zip` – [Download](sandbox:/mnt/data/bdu-inventory-react-fastapi.zip)
+
+---
+
+## 🧱 Kiến trúc chung (3‑tier)
+
+```
+Browser ⇄ Frontend (React/Vite, Nginx khi build) ⇄ Backend (FastAPI) ⇄ MySQL (Local Docker / Amazon RDS)
+```
+
+---
+
+## 🚀 Chạy LOCAL trước bằng VS Code (BDU Inventory)
+
+**1) MySQL (Docker cho dev):**
+
+```bash
+cd backend
+docker compose up -d
+mysql -h127.0.0.1 -P3306 -uroot -psecret <<'SQL'
+CREATE DATABASE IF NOT EXISTS bdu_inventory;
+USE bdu_inventory;
+SOURCE ../sql/schema.sql;
+SQL
+```
+
+**2) Backend (FastAPI):**
+
+```bash
+cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# DB_URL=mysql+aiomysql://root:secret@127.0.0.1:3306/bdu_inventory
+uvicorn app.main:app --reload --port 8080
+# http://localhost:8080/docs
+```
+
+**3) Frontend (React + Vite):**
+
+```bash
+cd frontend
+npm install
+cp .env.example .env
+# VITE_API_BASE_URL=http://localhost:8080
+npm run dev    # http://localhost:5173
+```
+
+> Mục tiêu: verify UI CRUD + healthcheck, DB cập nhật đúng.
+
+---
+
+## 🐳 Docker hóa (Dev hot‑reload)
+
+**Chạy toàn bộ (FE + BE + DB) với hot‑reload:**
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+# FE: http://localhost:5173 | BE: http://localhost:8080
+```
+
+* FE mount code → `npm run dev` (Vite HMR)
+* BE mount code → `uvicorn --reload`
+* DB: `mysql:8.0` container (root/secret)
+
+**Build kiểu “prod” (không hot‑reload, dùng RDS):**
+
+```bash
+export DB_URL="mysql+aiomysql://<user>:<pass>@<rds-endpoint>:3306/bdu_inventory"
+export CORS_ORIGINS="https://your-frontend-domain"
+docker compose build
+docker compose up -d
+# FE: 80 (Nginx) | BE: 8080
+```
+
+---
+
+## ☁️ Deploy AWS (tóm tắt)
+
+1. **RDS MySQL**: MySQL 8.0, tạo DB `bdu_inventory` và chạy `sql/schema.sql`.
+   SG RDS: cho phép inbound 3306 **từ SG của Backend EC2**.
+2. **Backend EC2 (Ubuntu 22.04)**:
+
+   * Cài Python 3.11, `python3-venv`, `pip`, clone source.
+   * `pip install -r requirements.txt`, tạo `.env`:
+
+     ```ini
+     APP_PORT=8080
+     DB_URL=mysql+aiomysql://<user>:<pass>@<rds-endpoint>:3306/bdu_inventory
+     CORS_ORIGINS=https://<frontend-domain>
+     ```
+   * Chạy `gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8080 app.main:app`
+     (hoặc dùng Docker Compose prod như trên).
+   * SG Backend: mở **8080** từ FE EC2 (hoặc tạm IP của bạn khi test).
+3. **Frontend EC2 (Ubuntu 22.04)**:
+
+   * Cài Node/NPM + Nginx.
+   * `npm ci && npm run build` → copy `dist/` vào `/var/www/html`.
+   * Sửa `.env` FE: `VITE_API_BASE_URL=https://<backend-host>:8080` rồi build.
+   * SG Frontend: mở **80/443**. Dùng Certbot nếu cần HTTPS.
+
+> Tip: có thể deploy cả FE+BE bằng Docker Compose trên từng EC2 để tối giản cài đặt.
+
+---
+
+## 🧪 API endpoints (BDU Inventory)
+
+**Products**
+
+* `GET /api/products`
+* `POST /api/products`
+  Body: `{ "sku":"P-001", "name":"BDU Pen", "unit_price":0.5 }`
+* `PUT /api/products/{id}`
+  Body như trên
+* `DELETE /api/products/{id}`
+
+**Suppliers**
+
+* `GET /api/suppliers`
+* `POST /api/suppliers`
+  Body: `{ "name":"BDU Supplies", "email":"...", "phone":"..." }`
+* `PUT /api/suppliers/{id}`
+* `DELETE /api/suppliers/{id}`
+
+**Stock Moves**
+
+* `GET /api/stock_moves`
+* `POST /api/stock_moves`
+  Body: `{ "product_id":1, "quantity":10, "move_type":"IN", "note":"initial" }`
+
+  > `move_type` = `IN` | `OUT`; chặn OUT > stock hiện tại.
+
+**Health**
+
+* `GET /health` → `{ "status":"ok" }`
+
+---
+
+## 🗂️ Cấu trúc thư mục (BDU Inventory)
+
+```
+root/
+ ├─ frontend/              # React (Vite)
+ │   ├─ .env.example       # VITE_API_BASE_URL
+ │   ├─ src/               # App.jsx (Products, Suppliers, Stock)
+ │   ├─ Dockerfile         # Build -> Nginx serve
+ │   └─ nginx.conf
+ ├─ backend/               # FastAPI
+ │   ├─ app/
+ │   │   ├─ main.py        # Routes
+ │   │   ├─ models.py      # Product, Supplier, StockMove
+ │   │   ├─ database.py    # Async engine + session
+ │   │   └─ crud.py, schemas.py
+ │   ├─ requirements.txt
+ │   ├─ .env.example       # APP_PORT, DB_URL, CORS_ORIGINS
+ │   ├─ Dockerfile
+ │   └─ docker-compose.yml # MySQL local for dev
+ ├─ sql/
+ │   └─ schema.sql         # Tạo bảng + seed data
+ ├─ docker-compose.dev.yml # Dev: FE+BE hot reload + MySQL
+ ├─ docker-compose.yml     # Prod: FE(Nginx)+BE(Uvicorn/Gunicorn)
+ └─ .vscode/
+     ├─ launch.json        # VS Code run FE/BE không cần Docker
+     └─ tasks.json         # pip install / npm install / compose
+```
+
+---
+
+## ⚙️ Biến môi trường (tham khảo)
+
+**Backend** `.env`
+
+```
+APP_PORT=8080
+DB_URL=mysql+aiomysql://root:secret@127.0.0.1:3306/bdu_inventory
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+```
+
+**Frontend** `.env`
+
+```
+VITE_API_BASE_URL=http://localhost:8080
+```
+
+---
+
+## 🔐 Gợi ý bảo mật & mạng (AWS)
+
+* RDS SG: chỉ cho phép 3306 từ SG của Backend EC2 (không mở public).
+* Backend SG: mở 8080 **chỉ** cho Frontend EC2 (hoặc ALB), tránh 0.0.0.0/0.
+* Dùng HTTPS (ALB hoặc Nginx + Certbot) cho cả frontend và backend khi public.
+* Tách **Network ACL**/Subnets private cho RDS, public cho EC2 (nếu cần).
+
+---
+
+## ➕ Mở rộng đề xuất
+
+* **Auth (JWT)** + phân quyền (Admin/Kho/Viewer)
+* **Purchase Orders** & **Sales Orders**; báo cáo tồn & lịch sử giao dịch
+* **Import/Export CSV/Excel**, **Audit logs**
+* **CI/CD** (GitHub Actions → ECR → EC2)
+* **Terraform** dựng EC2, RDS, SG theo chuẩn BDU
+
+> Cần thêm module nào, ghi chú tại đây để mình bổ sung vào codebase.
